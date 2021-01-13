@@ -1,11 +1,16 @@
 use crate::types::VarInt;
-use alloc::{vec::Vec, string::{FromUtf8Error, String}, fmt};
+use alloc::{
+    fmt,
+    string::{FromUtf8Error, String},
+    vec::Vec,
+};
+use std::str::Utf8Error;
 
 pub enum DeserializeErr {
     Eof,
     VarNumTooLong(Vec<u8>),
     NegativeLength(VarInt),
-    BadStringEncoding(FromUtf8Error),
+    BadStringEncoding(Utf8Error),
     InvalidBool(u8),
     NbtUnknownTagType(u8),
     NbtBadLength(isize),

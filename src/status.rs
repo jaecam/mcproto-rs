@@ -4,23 +4,24 @@ use crate::{
     Deserialize as McDeserialize, DeserializeErr, DeserializeResult, Serialize as McSerialize,
     SerializeErr, SerializeResult,
 };
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use alloc::{string::String, fmt, vec::Vec, borrow::ToOwned};
 use alloc::format;
+use alloc::{borrow::ToOwned, fmt, string::String, vec::Vec};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[cfg(all(test, feature = "std"))]
 use crate::protocol::TestRandom;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct StatusSpec {
+pub struct StatusSpec<'a> {
     pub version: Option<StatusVersionSpec>,
     pub players: StatusPlayersSpec,
-    pub description: Chat,
+    #[serde(borrow)]
+    pub description: Chat<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub favicon: Option<StatusFaviconSpec>,
 }
 
-impl McSerialize for StatusSpec {
+impl McSerialize for StatusSpec<'_> {
     fn mc_serialize<S: crate::Serializer>(&self, to: &mut S) -> SerializeResult {
         serde_json::to_string(self)
             .map_err(move |err| {
@@ -30,7 +31,7 @@ impl McSerialize for StatusSpec {
     }
 }
 
-impl McDeserialize for StatusSpec {
+impl McDeserialize for StatusSpec<'_> {
     fn mc_deserialize(data: &[u8]) -> DeserializeResult<'_, Self> {
         String::mc_deserialize(data)?.try_map(move |v| {
             serde_json::from_str(v.as_str()).map_err(move |err| {
@@ -119,15 +120,11 @@ impl<'de> Deserialize<'de> for StatusFaviconSpec {
                 let (content_type, v) = str_until_pat(v, ";", &self)?;
                 let rest = str_tag(v, "base64,", &self)?;
                 match base64::decode(rest.replace('\n', "")) {
-                    Ok(data) => {
-                        Ok(StatusFaviconSpec{
-                            data,
-                            content_type: content_type.to_owned(),
-                        })
-                    },
-                    Err(err) => {
-                        Err(E::custom(format_args!("failed base64 decode {:?}", err)))
-                    }
+                    Ok(data) => Ok(StatusFaviconSpec {
+                        data,
+                        content_type: content_type.to_owned(),
+                    }),
+                    Err(err) => Err(E::custom(format_args!("failed base64 decode {:?}", err))),
                 }
             }
         }
@@ -136,13 +133,10 @@ impl<'de> Deserialize<'de> for StatusFaviconSpec {
     }
 }
 
-fn str_tag<'a, E, V>(
-    target: &'a str,
-    expected: &str,
-    v: &V,
-) -> Result<&'a str, E> where
+fn str_tag<'a, E, V>(target: &'a str, expected: &str, v: &V) -> Result<&'a str, E>
+where
     E: serde::de::Error,
-    V: serde::de::Visitor<'a>
+    V: serde::de::Visitor<'a>,
 {
     let (front, back) = str_take(target, expected.len(), v)?;
     if front != expected {
@@ -152,36 +146,30 @@ fn str_tag<'a, E, V>(
     }
 }
 
-fn str_until_pat<'a, E, V>(
-    target: &'a str,
-    pat: &str,
-    v: &V,
-) -> Result<(&'a str, &'a str), E> where
+fn str_until_pat<'a, E, V>(target: &'a str, pat: &str, v: &V) -> Result<(&'a str, &'a str), E>
+where
     E: serde::de::Error,
-    V: serde::de::Visitor<'a>
+    V: serde::de::Visitor<'a>,
 {
     let n_pat = pat.len();
     if target.len() < n_pat {
         return Err(E::invalid_value(serde::de::Unexpected::Str(target), v));
     }
 
-    for i in 0..=(target.len()-n_pat) {
-        let v = &target[i..i+n_pat];
+    for i in 0..=(target.len() - n_pat) {
+        let v = &target[i..i + n_pat];
         if v == pat {
-            return Ok((&target[..i], &target[i+1..]));
+            return Ok((&target[..i], &target[i + 1..]));
         }
     }
 
     Err(E::invalid_value(serde::de::Unexpected::Str(target), v))
 }
 
-fn str_take<'a, E, V>(
-    target: &'a str,
-    n: usize,
-    v: &V,
-) -> Result<(&'a str, &'a str), E> where
+fn str_take<'a, E, V>(target: &'a str, n: usize, v: &V) -> Result<(&'a str, &'a str), E>
+where
     E: serde::de::Error,
-    V: serde::de::Visitor<'a>
+    V: serde::de::Visitor<'a>,
 {
     if target.len() < n {
         Err(E::invalid_value(serde::de::Unexpected::Str(target), v))

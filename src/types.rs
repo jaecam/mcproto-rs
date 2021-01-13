@@ -1,15 +1,16 @@
 // ... PRIMITIVE TYPES ...
 
-use alloc::{string::String, vec::Vec, fmt};
 use crate::utils::*;
 use crate::uuid::UUID4;
 use crate::*;
+use alloc::{fmt, string::String, vec::Vec};
 
 pub use super::chat::*;
 
+use crate::byte_order::{ByteOrder, ProtoByteOrder};
 #[cfg(all(test, feature = "std"))]
 use crate::protocol::TestRandom;
-use crate::byte_order::{ProtoByteOrder, ByteOrder};
+use std::string::FromUtf8Error;
 
 // bool
 impl Serialize for bool {
@@ -116,7 +117,10 @@ macro_rules! def_varnum {
                     if i == $max_bytes {
                         return DeserializeErr::VarNumTooLong(Vec::from(&orig_data[..i])).into();
                     }
-                    let Deserialized { value: byte, data: rest } = ProtoByteOrder::read_ubyte(data)?;
+                    let Deserialized {
+                        value: byte,
+                        data: rest,
+                    } = ProtoByteOrder::read_ubyte(data)?;
                     data = rest;
                     has_more = byte & 0x80 != 0;
                     v |= ((byte as $working_type) & 0x7F) << bit_place;
@@ -171,7 +175,7 @@ macro_rules! def_varnum {
                 Self(out)
             }
         }
-    }
+    };
 }
 
 def_varnum!(VarInt, i32, u32, 5);
@@ -192,7 +196,23 @@ impl Deserialize for String {
                 Err(DeserializeErr::NegativeLength(length))
             } else {
                 take(length.0 as usize, rest)?.try_map(move |taken| {
-                    String::from_utf8(taken.to_vec()).map_err(DeserializeErr::BadStringEncoding)
+                    String::from_utf8(taken.to_vec())
+                        .map_err(|e| e.utf8_error())
+                        .map_err(DeserializeErr::BadStringEncoding)
+                })
+            }
+        })
+    }
+}
+
+impl<'a> Deserialize for &'a str {
+    fn mc_deserialize(data: &'a [u8]) -> DeserializeResult<'a, Self> {
+        VarInt::mc_deserialize(data)?.and_then(move |length, rest| {
+            if length.0 < 0 {
+                Err(DeserializeErr::NegativeLength(length))
+            } else {
+                take(length.0 as usize, rest)?.try_map(move |taken| {
+                    std::str::from_utf8(taken).map_err(DeserializeErr::BadStringEncoding)
                 })
             }
         })
@@ -450,8 +470,8 @@ impl BytesSerializer {
 }
 
 impl<T> Serialize for Option<T>
-    where
-        T: Serialize,
+where
+    T: Serialize,
 {
     fn mc_serialize<S: Serializer>(&self, to: &mut S) -> SerializeResult {
         match self {
@@ -465,8 +485,8 @@ impl<T> Serialize for Option<T>
 }
 
 impl<T> Deserialize for Option<T>
-    where
-        T: Deserialize,
+where
+    T: Deserialize,
 {
     fn mc_deserialize(data: &[u8]) -> DeserializeResult<'_, Self> {
         bool::mc_deserialize(data)?.and_then(move |is_present, data| {
@@ -481,8 +501,8 @@ impl<T> Deserialize for Option<T>
 
 #[cfg(all(test, feature = "std"))]
 impl<T> TestRandom for Option<T>
-    where
-        T: TestRandom,
+where
+    T: TestRandom,
 {
     fn test_gen_random() -> Self {
         let is_present: bool = rand::random();
@@ -515,8 +535,14 @@ impl Serialize for ItemStack {
 
 impl Deserialize for ItemStack {
     fn mc_deserialize(data: &[u8]) -> DeserializeResult<'_, Self> {
-        let Deserialized { value: item_id, data } = VarInt::mc_deserialize(data)?;
-        let Deserialized { value: item_count, data } = i8::mc_deserialize(data)?;
+        let Deserialized {
+            value: item_id,
+            data,
+        } = VarInt::mc_deserialize(data)?;
+        let Deserialized {
+            value: item_count,
+            data,
+        } = i8::mc_deserialize(data)?;
         if data.is_empty() {
             return Err(DeserializeErr::Eof);
         }
@@ -529,7 +555,8 @@ impl Deserialize for ItemStack {
                 data: rest,
             },
             _ => nbt::read_named_tag(data)?.map(move |tag| Some(tag)),
-        }.map(move |nbt| Self {
+        }
+        .map(move |nbt| Self {
             item_id,
             item_count,
             nbt,
@@ -719,13 +746,16 @@ pub struct CountedArray<E, C> {
 }
 
 pub trait ArrayCounter: Serialize + Deserialize {
-
     fn as_count(&self) -> usize;
 
     fn from_count(count: usize) -> Self;
 }
 
-impl<E, C> Serialize for CountedArray<E, C> where E: Serialize, C: ArrayCounter {
+impl<E, C> Serialize for CountedArray<E, C>
+where
+    E: Serialize,
+    C: ArrayCounter,
+{
     fn mc_serialize<S: Serializer>(&self, to: &mut S) -> SerializeResult {
         let count = C::from_count(self.data.len());
         to.serialize_other(&count)?;
@@ -736,25 +766,41 @@ impl<E, C> Serialize for CountedArray<E, C> where E: Serialize, C: ArrayCounter 
     }
 }
 
-impl<E, C> Deserialize for CountedArray<E, C> where E: Deserialize, C: ArrayCounter {
+impl<E, C> Deserialize for CountedArray<E, C>
+where
+    E: Deserialize,
+    C: ArrayCounter,
+{
     fn mc_deserialize(data: &[u8]) -> DeserializeResult<'_, Self> {
-        let Deserialized { value: count, mut data } = C::mc_deserialize(data)?;
+        let Deserialized {
+            value: count,
+            mut data,
+        } = C::mc_deserialize(data)?;
         let count = count.as_count();
         let mut elems = Vec::with_capacity(count);
         for _ in 0..count {
-            let Deserialized { value: elem, data: rest } = E::mc_deserialize(data)?;
+            let Deserialized {
+                value: elem,
+                data: rest,
+            } = E::mc_deserialize(data)?;
             data = rest;
             elems.push(elem);
         }
 
-        Deserialized::ok(Self {
-            data: elems,
-            _counter_type: core::marker::PhantomData,
-        }, data)
+        Deserialized::ok(
+            Self {
+                data: elems,
+                _counter_type: core::marker::PhantomData,
+            },
+            data,
+        )
     }
 }
 
-impl<E, C> core::ops::Deref for CountedArray<E, C> where C: ArrayCounter {
+impl<E, C> core::ops::Deref for CountedArray<E, C>
+where
+    C: ArrayCounter,
+{
     type Target = Vec<E>;
 
     fn deref(&self) -> &Self::Target {
@@ -762,19 +808,28 @@ impl<E, C> core::ops::Deref for CountedArray<E, C> where C: ArrayCounter {
     }
 }
 
-impl<E, C> core::ops::DerefMut for CountedArray<E, C> where C: ArrayCounter {
+impl<E, C> core::ops::DerefMut for CountedArray<E, C>
+where
+    C: ArrayCounter,
+{
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.data
     }
 }
 
-impl<E, C> From<CountedArray<E, C>> for Vec<E> where C: ArrayCounter {
+impl<E, C> From<CountedArray<E, C>> for Vec<E>
+where
+    C: ArrayCounter,
+{
     fn from(other: CountedArray<E, C>) -> Self {
         other.data
     }
 }
 
-impl<E, C> From<Vec<E>> for CountedArray<E, C> where C: ArrayCounter {
+impl<E, C> From<Vec<E>> for CountedArray<E, C>
+where
+    C: ArrayCounter,
+{
     fn from(data: Vec<E>) -> Self {
         Self {
             data,
@@ -785,7 +840,9 @@ impl<E, C> From<Vec<E>> for CountedArray<E, C> where C: ArrayCounter {
 
 #[cfg(all(test, feature = "std"))]
 impl<E, C> TestRandom for CountedArray<E, C>
-    where E: TestRandom, C: ArrayCounter
+where
+    E: TestRandom,
+    C: ArrayCounter,
 {
     fn test_gen_random() -> Self {
         let elem_count: usize = rand::random::<usize>() % 32;
@@ -902,8 +959,8 @@ impl TestRandom for RemainingBytes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::fmt::Debug;
     use alloc::borrow::ToOwned;
+    use alloc::fmt::Debug;
 
     #[test]
     fn test_bool() {
@@ -1008,7 +1065,7 @@ mod tests {
             root: nbt::Tag::Compound(alloc::vec![
                 nbt::Tag::String("test 123".to_owned()).with_name("abc 123")
             ])
-                .with_name("root"),
+            .with_name("root"),
         })
     }
 

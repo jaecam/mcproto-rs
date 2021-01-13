@@ -1,22 +1,27 @@
-use alloc::{vec::Vec, string::{String, ToString}, collections::{BTreeMap}, boxed::Box, borrow::ToOwned, fmt, format};
-use serde::{Serialize, Deserialize, Deserializer, de, Serializer};
-use serde::de::{Visitor, Error, IntoDeserializer, MapAccess};
+use crate::{DeserializeResult, SerializeResult};
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    collections::BTreeMap,
+    fmt, format,
+    string::{String, ToString},
+    vec::Vec,
+};
+use serde::de::{Error, IntoDeserializer, MapAccess, Visitor};
 use serde::ser::SerializeMap;
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
-use crate::{SerializeResult, DeserializeResult};
-
-pub type BoxedChat = Box<Chat>;
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum Chat {
-    Text(TextComponent),
-    Translation(TranslationComponent),
-    Keybind(KeybindComponent),
-    Score(ScoreComponent),
+pub enum Chat<'a> {
+    Text(TextComponent<'a>),
+    Translation(TranslationComponent<'a>),
+    Keybind(KeybindComponent<'a>),
+    Score(ScoreComponent<'a>),
 }
 
-impl Chat {
-    pub fn base(&self) -> &BaseComponent {
+impl<'a> Chat<'a> {
+    pub fn base(&self) -> &BaseComponent<'a> {
         use Chat::*;
 
         match self {
@@ -27,22 +32,18 @@ impl Chat {
         }
     }
 
-    pub fn siblings(&self) -> &Vec<Chat> {
+    pub fn siblings(&self) -> &[Chat] {
         &self.base().extra
     }
 
-    pub fn boxed(self) -> BoxedChat {
-        Box::new(self)
-    }
-
-    pub fn from_text(text: &str) -> Chat {
+    pub fn from_text(text: &str) -> Chat<'_> {
         Chat::Text(TextComponent {
             base: BaseComponent::default(),
-            text: text.to_owned(),
+            text: Cow::Borrowed(text),
         })
     }
 
-    pub fn from_traditional(orig: &str, translate_colorcodes: bool) -> Chat {
+    pub fn from_traditional(orig: &str, translate_colorcodes: bool) -> Chat<'_> {
         TraditionalParser::new(orig, translate_colorcodes).parse()
     }
 
@@ -51,12 +52,12 @@ impl Chat {
 
         match self {
             Text(body) => Some(body.to_traditional()),
-            _ => None
+            _ => None,
         }
     }
 }
 
-struct TraditionalParser {
+struct TraditionalParser<'a> {
     source: Vec<char>,
     at: usize,
     translate_colorcodes: bool,
@@ -71,11 +72,10 @@ struct TraditionalParser {
     obfuscated: bool,
 
     // all the parts we've already seen
-    done: Vec<TextComponent>,
+    done: Vec<TextComponent<'a>>,
 }
 
-impl TraditionalParser {
-
+impl<'a> TraditionalParser<'a> {
     fn new(source: &str, translate_colorcodes: bool) -> Self {
         Self {
             source: source.chars().collect(),
@@ -94,14 +94,14 @@ impl TraditionalParser {
         }
     }
 
-    fn parse(mut self) -> Chat {
+    fn parse(mut self) -> Chat<'a> {
         loop {
             if let Some(formatter) = self.consume_formatter() {
                 self.handle_formatter(formatter)
             } else if let Some(next) = self.consume_char() {
                 self.push_next(next)
             } else {
-                return self.finalize()
+                return self.finalize();
             }
         }
     }
@@ -134,7 +134,7 @@ impl TraditionalParser {
     fn finish_current(&mut self) {
         if self.has_text() {
             let current = TextComponent {
-                text: self.text.clone(),
+                text: Cow::Owned(std::mem::take(&mut self.text)),
                 base: BaseComponent {
                     color: self.color.clone(),
                     bold: self.bold,
@@ -145,10 +145,9 @@ impl TraditionalParser {
                     hover_event: None,
                     click_event: None,
                     insertion: None,
-                    extra: Vec::default()
-                }
+                    extra: Vec::default(),
+                },
             };
-            self.text.clear();
             self.done.push(current);
         }
 
@@ -165,14 +164,17 @@ impl TraditionalParser {
     }
 
     fn has_text(&self) -> bool {
-        return !self.text.is_empty()
+        return !self.text.is_empty();
     }
 
     fn is_on_formatter(&self) -> bool {
-        self.source.get(self.at).map(move |c| {
-            let c = *c;
-            c == SECTION_SYMBOL || (self.translate_colorcodes && c == '&')
-        }).unwrap_or(false)
+        self.source
+            .get(self.at)
+            .map(move |c| {
+                let c = *c;
+                c == SECTION_SYMBOL || (self.translate_colorcodes && c == '&')
+            })
+            .unwrap_or(false)
     }
 
     fn consume_char(&mut self) -> Option<char> {
@@ -199,7 +201,7 @@ impl TraditionalParser {
         }
     }
 
-    fn finalize(mut self) -> Chat {
+    fn finalize(mut self) -> Chat<'a> {
         self.finish_current();
         self.simplify();
         let n_components = self.done.len();
@@ -208,14 +210,16 @@ impl TraditionalParser {
         }
 
         let mut top_level = TextComponent {
-            text: String::default(),
+            text: Default::default(),
             base: BaseComponent::default(),
         };
 
         if n_components > 0 {
             top_level.base.extra.extend(
-                self.done.into_iter()
-                    .map(move |component| Chat::Text(component)));
+                self.done
+                    .into_iter()
+                    .map(move |component| Chat::Text(component)),
+            );
         }
 
         Chat::Text(top_level)
@@ -223,12 +227,12 @@ impl TraditionalParser {
 
     fn simplify(&mut self) {
         let mut updated = Vec::with_capacity(self.done.len());
-        let mut last: Option<TextComponent> = None;
+        let mut last: Option<TextComponent<'a>> = None;
         while !self.done.is_empty() {
             let cur = self.done.remove(0);
             if let Some(mut la) = last.take() {
                 if la.base.has_same_style_as(&cur.base) {
-                    la.text.extend(cur.text.chars());
+                    la.text.to_mut().extend(cur.text.chars());
                     last = Some(la);
                     continue;
                 } else {
@@ -248,7 +252,7 @@ impl TraditionalParser {
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
-pub struct BaseComponent {
+pub struct BaseComponent<'a> {
     #[serde(skip_serializing_if = "should_skip_flag_field")]
     pub bold: bool,
     #[serde(skip_serializing_if = "should_skip_flag_field")]
@@ -262,33 +266,32 @@ pub struct BaseComponent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<ColorCode>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub insertion: Option<String>,
+    pub insertion: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub click_event: Option<ChatClickEvent>,
+    pub click_event: Option<ChatClickEvent<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub hover_event: Option<ChatHoverEvent>,
+    pub hover_event: Option<ChatHoverEvent<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub extra: Vec<Chat>,
+    pub extra: Vec<Chat<'a>>,
 }
 
 fn should_skip_flag_field(flag: &bool) -> bool {
     !*flag
 }
 
-impl BaseComponent {
-
+impl<'a> BaseComponent<'a> {
     fn has_same_style_as(&self, other: &Self) -> bool {
-        other.bold == self.bold &&
-            other.italic == self.italic &&
-            other.underlined == self.underlined &&
-            other.strikethrough == self.strikethrough &&
-            other.obfuscated == self.obfuscated &&
-            other.color.eq(&self.color)
+        other.bold == self.bold
+            && other.italic == self.italic
+            && other.underlined == self.underlined
+            && other.strikethrough == self.strikethrough
+            && other.obfuscated == self.obfuscated
+            && other.color.eq(&self.color)
     }
 }
 
-impl Into<BaseComponent> for JsonComponentBase {
-    fn into(self) -> BaseComponent {
+impl<'a> Into<BaseComponent<'a>> for JsonComponentBase<'a> {
+    fn into(self) -> BaseComponent<'a> {
         BaseComponent {
             bold: self.bold.unwrap_or(false),
             italic: self.italic.unwrap_or(false),
@@ -305,26 +308,26 @@ impl Into<BaseComponent> for JsonComponentBase {
 }
 
 #[derive(Deserialize)]
-struct JsonComponentBase {
+struct JsonComponentBase<'a> {
     pub bold: Option<bool>,
     pub italic: Option<bool>,
     pub underlined: Option<bool>,
     pub strikethrough: Option<bool>,
     pub obfuscated: Option<bool>,
     pub color: Option<ColorCode>,
-    pub insertion: Option<String>,
+    pub insertion: Option<&'a str>,
     #[serde(rename = "clickEvent")]
-    pub click_event: Option<ChatClickEvent>,
+    pub click_event: Option<ChatClickEvent<'a>>,
     #[serde(rename = "hoverEvent")]
-    pub hover_event: Option<ChatHoverEvent>,
+    pub hover_event: Option<ChatHoverEvent<'a>>,
     #[serde(default = "Vec::default")]
-    pub extra: Vec<Chat>,
+    pub extra: Vec<Chat<'a>>,
 
     #[serde(flatten)]
-    _additional: BTreeMap<String, serde_json::Value>
+    _additional: BTreeMap<String, serde_json::Value>,
 }
 
-impl Default for BaseComponent {
+impl<'a> Default for BaseComponent<'a> {
     fn default() -> Self {
         Self {
             bold: false,
@@ -342,15 +345,15 @@ impl Default for BaseComponent {
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
-pub struct TextComponent {
-    pub text: String,
+pub struct TextComponent<'a> {
+    pub text: Cow<'a, str>,
 
     #[serde(flatten)]
     #[serde(skip_deserializing)]
-    pub base: BaseComponent,
+    pub base: BaseComponent<'a>,
 }
 
-impl TextComponent {
+impl<'a> TextComponent<'a> {
     pub fn to_traditional(&self) -> String {
         let b = &self.base;
         let text = &self.text;
@@ -372,7 +375,7 @@ impl TextComponent {
                     Some(child_fmts) => {
                         last_had_formatters = true;
                         buf.extend(child_fmts.chars())
-                    },
+                    }
                     None => {
                         last_had_formatters = false;
                     }
@@ -422,64 +425,69 @@ impl TextComponent {
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
-pub struct TranslationComponent {
-    pub translate: String,
+pub struct TranslationComponent<'a> {
+    pub translate: &'a str,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub with: Vec<Chat>,
+    pub with: Vec<Chat<'a>>,
 
     #[serde(flatten)]
     #[serde(skip_deserializing)]
-    pub base: BaseComponent,
+    pub base: BaseComponent<'a>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
-pub struct KeybindComponent {
-    pub keybind: String,
+pub struct KeybindComponent<'a> {
+    pub keybind: &'a str,
 
     #[serde(flatten)]
     #[serde(skip_deserializing)]
-    pub base: BaseComponent
+    pub base: BaseComponent<'a>,
 }
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
-pub struct ScoreComponent {
-    pub score: ScoreComponentObjective,
+pub struct ScoreComponent<'a> {
+    #[serde(borrow)]
+    pub score: ScoreComponentObjective<'a>,
 
     #[serde(flatten)]
     #[serde(skip_deserializing)]
-    pub base: BaseComponent
+    pub base: BaseComponent<'a>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
-pub struct ScoreComponentObjective {
-    pub name: String,
+pub struct ScoreComponentObjective<'a> {
+    pub name: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub objective: Option<String>,
+    pub objective: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub value: Option<String>,
+    pub value: Option<&'a str>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum ChatClickEvent {
-    OpenUrl(String),
-    RunCommand(String),
-    SuggestCommand(String),
-    ChangePage(i32)
+pub enum ChatClickEvent<'a> {
+    OpenUrl(&'a str),
+    RunCommand(&'a str),
+    SuggestCommand(&'a str),
+    ChangePage(i32),
 }
 
-impl Serialize for ChatClickEvent {
-    fn serialize<S>(&self, serializer: S) -> Result<<S as Serializer>::Ok, <S as Serializer>::Error> where
-        S: Serializer
+impl<'a> Serialize for ChatClickEvent<'a> {
+    fn serialize<S>(&self, serializer: S) -> Result<<S as Serializer>::Ok, <S as Serializer>::Error>
+    where
+        S: Serializer,
     {
         let mut m = serializer.serialize_map(Some(2))?;
 
         use ChatClickEvent::*;
 
-        m.serialize_entry("action", match self {
-            OpenUrl(_) => "open_url",
-            RunCommand(_) => "run_command",
-            SuggestCommand(_) => "suggest_command",
-            ChangePage(_) => "change_page",
-        })?;
+        m.serialize_entry(
+            "action",
+            match self {
+                OpenUrl(_) => "open_url",
+                RunCommand(_) => "run_command",
+                SuggestCommand(_) => "suggest_command",
+                ChangePage(_) => "change_page",
+            },
+        )?;
 
         m.serialize_key("value")?;
 
@@ -494,43 +502,60 @@ impl Serialize for ChatClickEvent {
     }
 }
 
-impl<'de> Deserialize<'de> for ChatClickEvent {
-    fn deserialize<D>(deserializer: D) -> Result<Self, <D as Deserializer<'de>>::Error> where
-        D: Deserializer<'de>
+impl<'de: 'a, 'a> Deserialize<'de> for ChatClickEvent<'a> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, <D as Deserializer<'de>>::Error>
+    where
+        D: Deserializer<'de>,
     {
         struct V;
 
         impl<'de> Visitor<'de> for V {
-            type Value = ChatClickEvent;
+            type Value = ChatClickEvent<'de>;
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 write!(f, "an event object for ChatClickEvent")
             }
 
-            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, <A as MapAccess<'de>>::Error> where
-                A: MapAccess<'de>
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, <A as MapAccess<'de>>::Error>
+            where
+                A: MapAccess<'de>,
             {
                 let (action, value) = read_event(&mut map)?;
 
                 use ChatClickEvent::*;
                 match action {
                     "open_url" => match value.as_str() {
-                        Some(url) => Ok(OpenUrl(url.to_owned())),
-                        None => Err(A::Error::custom(format!("open_url requires string body, got {}", value)))
+                        Some(url) => Ok(OpenUrl(url)),
+                        None => Err(A::Error::custom(format!(
+                            "open_url requires string body, got {}",
+                            value
+                        ))),
                     },
                     "run_command" => match value.as_str() {
-                        Some(cmd) => Ok(RunCommand(cmd.to_owned())),
-                        None => Err(A::Error::custom(format!("run_command requires string body, got {}", value)))
+                        Some(cmd) => Ok(RunCommand(cmd)),
+                        None => Err(A::Error::custom(format!(
+                            "run_command requires string body, got {}",
+                            value
+                        ))),
                     },
                     "suggest_command" => match value.as_str() {
-                        Some(cmd) => Ok(SuggestCommand(cmd.to_owned())),
-                        None => Err(A::Error::custom(format!("suggest_command requires string body, got {}", value)))
+                        Some(cmd) => Ok(SuggestCommand(cmd)),
+                        None => Err(A::Error::custom(format!(
+                            "suggest_command requires string body, got {}",
+                            value
+                        ))),
                     },
                     "change_page" => match value.as_i64() {
                         Some(v) => Ok(ChangePage(v as i32)),
-                        None => Err(A::Error::custom(format!("change_page requires integer body, got {}", value)))
+                        None => Err(A::Error::custom(format!(
+                            "change_page requires integer body, got {}",
+                            value
+                        ))),
                     },
-                    other => Err(A::Error::custom(format!("invalid click action kind {}", other)))
+                    other => Err(A::Error::custom(format!(
+                        "invalid click action kind {}",
+                        other
+                    ))),
                 }
             }
         }
@@ -540,25 +565,29 @@ impl<'de> Deserialize<'de> for ChatClickEvent {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum ChatHoverEvent {
-    ShowText(BoxedChat),
+pub enum ChatHoverEvent<'a> {
+    ShowText(Box<Chat<'a>>),
     ShowItem(Value),
-    ShowEntity(Value)
+    ShowEntity(Value),
 }
 
-impl Serialize for ChatHoverEvent {
-    fn serialize<S>(&self, serializer: S) -> Result<<S as Serializer>::Ok, <S as Serializer>::Error> where
-        S: Serializer
+impl<'a> Serialize for ChatHoverEvent<'a> {
+    fn serialize<S>(&self, serializer: S) -> Result<<S as Serializer>::Ok, <S as Serializer>::Error>
+    where
+        S: Serializer,
     {
         let mut m = serializer.serialize_map(Some(2))?;
 
         use ChatHoverEvent::*;
 
-        m.serialize_entry("action", match self {
-            ShowText(_) => "show_text",
-            ShowItem(_) => "show_item",
-            ShowEntity(_) => "show_entity",
-        })?;
+        m.serialize_entry(
+            "action",
+            match self {
+                ShowText(_) => "show_text",
+                ShowItem(_) => "show_item",
+                ShowEntity(_) => "show_entity",
+            },
+        )?;
 
         m.serialize_key("value")?;
 
@@ -572,35 +601,40 @@ impl Serialize for ChatHoverEvent {
     }
 }
 
-impl<'de> Deserialize<'de> for ChatHoverEvent {
-    fn deserialize<D>(deserializer: D) -> Result<Self, <D as Deserializer<'de>>::Error> where
-        D: Deserializer<'de>
+impl<'de: 'a, 'a> Deserialize<'de> for ChatHoverEvent<'a> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, <D as Deserializer<'de>>::Error>
+    where
+        D: Deserializer<'de>,
     {
         struct V;
 
         impl<'de> Visitor<'de> for V {
-            type Value = ChatHoverEvent;
+            type Value = ChatHoverEvent<'de>;
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 write!(f, "an event object for ChatClickEvent")
             }
 
             //noinspection ALL
-            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, <A as MapAccess<'de>>::Error> where
-                A: MapAccess<'de>
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, <A as MapAccess<'de>>::Error>
+            where
+                A: MapAccess<'de>,
             {
                 let (action, value) = read_event(&mut map)?;
 
                 use ChatHoverEvent::*;
                 match action {
-                    "show_text" => Ok(ShowText(
-                        Chat::deserialize(value.into_deserializer())
-                            .map_err(move |err| A::Error::custom(
-                                format!("error deserializing text to show {:?}", err)))?
-                            .boxed())),
+                    "show_text" => Ok(ShowText(Box::new(
+                        Chat::deserialize(value.into_deserializer()).map_err(move |err| {
+                            A::Error::custom(format!("error deserializing text to show {:?}", err))
+                        })?,
+                    ))),
                     "show_item" => Ok(ShowItem(value)),
                     "show_entity" => Ok(ShowEntity(value)),
-                    other => Err(A::Error::custom(format!("invalid hover action kind {}", other)))
+                    other => Err(A::Error::custom(format!(
+                        "invalid hover action kind {}",
+                        other
+                    ))),
                 }
             }
         }
@@ -726,15 +760,18 @@ impl fmt::Display for ColorCode {
 }
 
 impl Serialize for ColorCode {
-    fn serialize<S>(&self, serializer: S) -> Result<<S as Serializer>::Ok, <S as Serializer>::Error> where
-        S: Serializer {
+    fn serialize<S>(&self, serializer: S) -> Result<<S as Serializer>::Ok, <S as Serializer>::Error>
+    where
+        S: Serializer,
+    {
         serializer.serialize_str(self.name())
     }
 }
 
 impl<'de> Deserialize<'de> for ColorCode {
-    fn deserialize<D>(deserializer: D) -> Result<Self, <D as Deserializer<'de>>::Error> where
-        D: Deserializer<'de>
+    fn deserialize<D>(deserializer: D) -> Result<Self, <D as Deserializer<'de>>::Error>
+    where
+        D: Deserializer<'de>,
     {
         struct V;
 
@@ -745,7 +782,8 @@ impl<'de> Deserialize<'de> for ColorCode {
                 write!(fmt, "a string representing a color code")
             }
 
-            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> where
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
                 E: de::Error,
             {
                 if let Some(code) = ColorCode::from_name(v) {
@@ -827,41 +865,60 @@ impl fmt::Display for Formatter {
     }
 }
 
-
-impl<'de> Deserialize<'de> for Chat {
-    fn deserialize<D>(deserializer: D) -> Result<Self, <D as Deserializer<'de>>::Error> where
-        D: Deserializer<'de>
+impl<'de: 'a, 'a> Deserialize<'de> for Chat<'a> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, <D as Deserializer<'de>>::Error>
+    where
+        D: Deserializer<'de>,
     {
         struct V;
 
         impl<'de> Visitor<'de> for V {
-            type Value = Chat;
+            type Value = Chat<'de>;
 
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(formatter, "any primitive or a JSON object specifying the component")
+                write!(
+                    formatter,
+                    "any primitive or a JSON object specifying the component"
+                )
             }
 
-            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> where E: de::Error {
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
                 self.visit_string(value.to_string())
             }
 
-            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> where E: de::Error {
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
                 self.visit_string(value.to_string())
             }
 
-            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E> where E: de::Error {
+            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
                 self.visit_string(value.to_string())
             }
 
-            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> where E: de::Error {
+            fn visit_str<E>(self, value: &'de str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
                 Ok(Chat::Text(TextComponent {
                     base: BaseComponent::default(),
-                    text: value.to_owned(),
+                    text: Cow::Borrowed(value),
                 }))
             }
 
-            fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error> where M: de::MapAccess<'de> {
-                let mut base: JsonComponentBase = de::Deserialize::deserialize(de::value::MapAccessDeserializer::new(map))?;
+            fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
+            where
+                M: de::MapAccess<'de>,
+            {
+                let mut base: JsonComponentBase =
+                    de::Deserialize::deserialize(de::value::MapAccessDeserializer::new(map))?;
                 let additional = &mut base._additional;
 
                 // string component
@@ -869,11 +926,14 @@ impl<'de> Deserialize<'de> for Chat {
                     return if let Some(text) = raw_text.as_str() {
                         additional.clear();
                         Ok(Chat::Text(TextComponent {
-                            text: text.to_owned(),
+                            text: Cow::Borrowed(text),
                             base: base.into(),
                         }))
                     } else {
-                        Err(M::Error::custom(format!("have text but it's not a string - {:?}", raw_text)))
+                        Err(M::Error::custom(format!(
+                            "have text but it's not a string - {:?}",
+                            raw_text
+                        )))
                     };
                 }
 
@@ -889,36 +949,45 @@ impl<'de> Deserialize<'de> for Chat {
                                         .map_err(move |err| M::Error::custom(
                                             format!("unable to parse one of the translation with entries :: {}", err)))?);
                                 }
-                                Ok(Chat::Translation(TranslationComponent{
+                                Ok(Chat::Translation(TranslationComponent {
                                     base: base.into(),
-                                    translate: translate.to_owned(),
+                                    translate,
                                     with: withs_out,
                                 }))
                             } else {
-                                Err(M::Error::custom(format!("have with but it's not an array - {:?}", raw_with)))
+                                Err(M::Error::custom(format!(
+                                    "have with but it's not an array - {:?}",
+                                    raw_with
+                                )))
                             }
                         } else {
-                            Ok(Chat::Translation(TranslationComponent{
+                            Ok(Chat::Translation(TranslationComponent {
                                 base: base.into(),
-                                translate: translate.to_owned(),
+                                translate,
                                 with: Vec::default(),
                             }))
                         }
                     } else {
-                        Err(M::Error::custom(format!("have translate but it's not a string - {:?}", raw_translate)))
-                    }
+                        Err(M::Error::custom(format!(
+                            "have translate but it's not a string - {:?}",
+                            raw_translate
+                        )))
+                    };
                 }
 
                 // keybind
                 if let Some(raw_keybind) = additional.remove("keybind") {
                     return if let Some(keybind) = raw_keybind.as_str() {
-                        Ok(Chat::Keybind(KeybindComponent{
-                            keybind: keybind.to_owned(),
-                            base: base.into()
+                        Ok(Chat::Keybind(KeybindComponent {
+                            keybind,
+                            base: base.into(),
                         }))
                     } else {
-                        Err(M::Error::custom(format!("have keybind but it's not a string! {:?}", raw_keybind)))
-                    }
+                        Err(M::Error::custom(format!(
+                            "have keybind but it's not a string! {:?}",
+                            raw_keybind
+                        )))
+                    };
                 }
 
                 // score
@@ -927,7 +996,7 @@ impl<'de> Deserialize<'de> for Chat {
                         .map_err(move |err| M::Error::custom(
                             format!("failed to deserialize scoreboard objective for score chat component :: {:?}", err)))?;
 
-                    return Ok(Chat::Score(ScoreComponent{
+                    return Ok(Chat::Score(ScoreComponent {
                         score,
                         base: base.into(),
                     }));
@@ -935,7 +1004,9 @@ impl<'de> Deserialize<'de> for Chat {
 
                 // selector (SKIP)
 
-                Err(M::Error::custom("not able to parse chat component, not a valid chat component kind"))
+                Err(M::Error::custom(
+                    "not able to parse chat component, not a valid chat component kind",
+                ))
             }
         }
 
@@ -943,9 +1014,10 @@ impl<'de> Deserialize<'de> for Chat {
     }
 }
 
-impl Serialize for Chat {
-    fn serialize<S>(&self, serializer: S) -> Result<<S as Serializer>::Ok, <S as Serializer>::Error> where
-        S: Serializer
+impl<'a> Serialize for Chat<'a> {
+    fn serialize<S>(&self, serializer: S) -> Result<<S as Serializer>::Ok, <S as Serializer>::Error>
+    where
+        S: Serializer,
     {
         use Chat::*;
 
@@ -953,33 +1025,41 @@ impl Serialize for Chat {
             Text(body) => body.serialize(serializer),
             Translation(body) => body.serialize(serializer),
             Keybind(body) => body.serialize(serializer),
-            Score(body) => body.serialize(serializer)
+            Score(body) => body.serialize(serializer),
         }
     }
 }
 
-impl super::Serialize for Chat {
+impl<'a> super::Serialize for Chat<'a> {
     fn mc_serialize<S: super::Serializer>(&self, to: &mut S) -> SerializeResult {
         serde_json::to_string(self)
-            .map_err(move |err| super::SerializeErr::FailedJsonEncode(
-                format!("error while encoding chat :: {:?} -> {:?}", self, err)))?
+            .map_err(move |err| {
+                super::SerializeErr::FailedJsonEncode(format!(
+                    "error while encoding chat :: {:?} -> {:?}",
+                    self, err
+                ))
+            })?
             .mc_serialize(to)
     }
 }
 
-impl super::Deserialize for Chat {
-    fn mc_deserialize(data: &[u8]) -> DeserializeResult<'_, Self> {
-        String::mc_deserialize(data)?.try_map(move |raw| {
-            serde_json::from_str(raw.as_str()).map_err(move |err|
+impl<'a> super::Deserialize for Chat<'a> {
+    fn mc_deserialize(data: &'a [u8]) -> DeserializeResult<'a, Self> {
+        //let s: DeserializeResult<'a, &'a str> = super::Deserialize::mc_deserialize(data);
+        super::Deserialize::mc_deserialize(data)?.try_map(|raw: &str| {
+            serde_json::from_str(raw).map_err(move |err| {
                 super::DeserializeErr::FailedJsonDeserialize(format!(
-                    "failed to deserialize chat from JSON '{}' :: {:?}", raw, err
-                )))
+                    "failed to deserialize chat from JSON '{}' :: {:?}",
+                    raw, err
+                ))
+            })
         })
     }
 }
 
 #[cfg(all(test, feature = "std"))]
 use super::protocol::TestRandom;
+use std::borrow::Cow;
 
 #[cfg(all(test, feature = "std"))]
 impl TestRandom for Chat {
@@ -989,10 +1069,9 @@ impl TestRandom for Chat {
     }
 }
 
-fn read_event<'de, A>(
-    access: &mut A,
-) -> Result<(&'de str, Value), <A as MapAccess<'de>>::Error>
-    where A: MapAccess<'de>
+fn read_event<'de, A>(access: &mut A) -> Result<(&'de str, Value), <A as MapAccess<'de>>::Error>
+where
+    A: MapAccess<'de>,
 {
     let mut action: Option<&str> = None;
     let mut value: Option<Value> = None;
@@ -1004,15 +1083,18 @@ fn read_event<'de, A>(
                     if action.is_none() {
                         return Err(A::Error::custom("none for value key=action"));
                     }
-                },
+                }
                 "value" => {
                     value = access.next_value()?;
                     if value.is_none() {
                         return Err(A::Error::custom("none for value key=value"));
                     }
-                },
+                }
                 other => {
-                    return Err(A::Error::custom(format!("unexpected key in event {}", other)));
+                    return Err(A::Error::custom(format!(
+                        "unexpected key in event {}",
+                        other
+                    )));
                 }
             }
         } else {
@@ -1031,40 +1113,49 @@ pub mod tests {
     #[test]
     fn test_from_traditional_simple() {
         let out = Chat::from_traditional("&cthis &cis red, and &rthis is &e&lyellow", true);
-        assert_eq!(out, Chat::Text(TextComponent{
-            text: String::default(),
-            base: {
-                let mut b = BaseComponent::default();
-                b.extra = alloc::vec!(
-                    Chat::Text(TextComponent{
-                        text: "this is red, and ".to_owned(),
-                        base: {
-                            let mut b = BaseComponent::default();
-                            b.color = Some(ColorCode::Red);
-                            b
-                        },
-                    }),
-                    Chat::Text(TextComponent{
-                        text: "this is ".to_owned(),
-                        base: BaseComponent::default(),
-                    }),
-                    Chat::Text(TextComponent{
-                        text: "yellow".to_owned(),
-                        base: {
-                            let mut b = BaseComponent::default();
-                            b.color = Some(ColorCode::Yellow);
-                            b.bold = true;
-                            b
-                        }
-                    })
-                );
-                b
-            }
-        }));
+        assert_eq!(
+            out,
+            Chat::Text(TextComponent {
+                text: Default::default(),
+                base: {
+                    let mut b = BaseComponent::default();
+                    b.extra = alloc::vec!(
+                        Chat::Text(TextComponent {
+                            text: Cow::Borrowed("this is red, and "),
+                            base: {
+                                let mut b = BaseComponent::default();
+                                b.color = Some(ColorCode::Red);
+                                b
+                            },
+                        }),
+                        Chat::Text(TextComponent {
+                            text: Cow::Borrowed("this is "),
+                            base: BaseComponent::default(),
+                        }),
+                        Chat::Text(TextComponent {
+                            text: Cow::Borrowed("yellow"),
+                            base: {
+                                let mut b = BaseComponent::default();
+                                b.color = Some(ColorCode::Yellow);
+                                b.bold = true;
+                                b
+                            }
+                        })
+                    );
+                    b
+                }
+            })
+        );
 
         let traditional = out.to_traditional().expect("is text");
-        assert_eq!(traditional.as_str(), "§cthis is red, and §rthis is §e§lyellow");
-        #[cfg(feature="std")]
-        println!("{}", serde_json::to_string_pretty(&out).expect("should serialize fine"));
+        assert_eq!(
+            traditional.as_str(),
+            "§cthis is red, and §rthis is §e§lyellow"
+        );
+        #[cfg(feature = "std")]
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out).expect("should serialize fine")
+        );
     }
 }

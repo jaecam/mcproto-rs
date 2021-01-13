@@ -1,10 +1,16 @@
 use crate::utils::take;
 use crate::{DeserializeErr, DeserializeResult, Deserialized};
-use alloc::{string::{String, ToString}, borrow::ToOwned, fmt, vec::Vec, vec, format};
+use alloc::{
+    borrow::ToOwned,
+    fmt, format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 
+use crate::byte_order::{ByteOrder, ProtoByteOrder};
 #[cfg(all(test, feature = "std"))]
 use crate::protocol::TestRandom;
-use crate::byte_order::{ProtoByteOrder, ByteOrder};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct NamedTag {
@@ -169,8 +175,8 @@ impl TestRandom for Tag {
 }
 
 fn write_contents<F>(contents: &Vec<F>) -> String
-    where
-        F: fmt::Display,
+where
+    F: fmt::Display,
 {
     format!(
         "{} entries\n{{\n{}\n}}",
@@ -192,7 +198,10 @@ fn write_contents<F>(contents: &Vec<F>) -> String
 
 // reads from the root level
 fn read_nbt_data(data: &[u8]) -> DeserializeResult<NamedTag> {
-    let Deserialized { value: tag_type_id, data: _ } = ProtoByteOrder::read_ubyte(data)?;
+    let Deserialized {
+        value: tag_type_id,
+        data: _,
+    } = ProtoByteOrder::read_ubyte(data)?;
     match tag_type_id {
         0x0A => read_named_tag(data),
         other => Err(DeserializeErr::NbtInvalidStartTag(other)),
@@ -201,7 +210,10 @@ fn read_nbt_data(data: &[u8]) -> DeserializeResult<NamedTag> {
 
 // reads any named tag: read id -> read name -> read tag with id -> name tag with name
 pub fn read_named_tag(data: &[u8]) -> DeserializeResult<NamedTag> {
-    let Deserialized { value: tag_type_id, data } = ProtoByteOrder::read_ubyte(data)?;
+    let Deserialized {
+        value: tag_type_id,
+        data,
+    } = ProtoByteOrder::read_ubyte(data)?;
     if tag_type_id == 0x00 {
         // tag end
         Deserialized::ok(Tag::End.with_name(""), data)
@@ -266,16 +278,24 @@ fn read_tag_string(data: &[u8]) -> DeserializeResult<Tag> {
 }
 
 fn read_tag_list(data: &[u8]) -> DeserializeResult<Tag> {
-    let Deserialized { value: contents_tag_type_id, data } = ProtoByteOrder::read_ubyte(data)?;
-    let Deserialized { value: list_length, data } = ProtoByteOrder::read_int(data)?;
+    let Deserialized {
+        value: contents_tag_type_id,
+        data,
+    } = ProtoByteOrder::read_ubyte(data)?;
+    let Deserialized {
+        value: list_length,
+        data,
+    } = ProtoByteOrder::read_int(data)?;
     if list_length == 0 {
         Deserialized::ok(Tag::List(vec![]), data)
     } else {
         let mut out_vec = Vec::with_capacity(list_length as usize);
         let mut remaining_data = data;
         for _ in 0..list_length {
-            let Deserialized { value: element, data: rest } =
-                read_tag(contents_tag_type_id, &remaining_data)?;
+            let Deserialized {
+                value: element,
+                data: rest,
+            } = read_tag(contents_tag_type_id, &remaining_data)?;
 
             out_vec.push(element);
             remaining_data = rest;
@@ -316,11 +336,12 @@ fn read_array_tag<'a, R, F, M>(
     parser: F,
     finalizer: M,
 ) -> DeserializeResult<'a, Tag>
-    where
-        F: Fn(&'a [u8]) -> DeserializeResult<'a, R>,
-        M: Fn(Vec<R>) -> Tag,
+where
+    F: Fn(&'a [u8]) -> DeserializeResult<'a, R>,
+    M: Fn(Vec<R>) -> Tag,
 {
-    let Deserialized { value: count, data } = ProtoByteOrder::read_int(data)?.map(move |v| v as i32);
+    let Deserialized { value: count, data } =
+        ProtoByteOrder::read_int(data)?.map(move |v| v as i32);
     if count < 0 {
         Err(DeserializeErr::NbtBadLength(count as isize))
     } else {
@@ -344,7 +365,7 @@ fn read_string(data: &[u8]) -> DeserializeResult<String> {
         .and_then(move |length, data| take(length as usize, data))?
         .try_map(move |bytes| {
             String::from_utf8(Vec::from(bytes))
-                .map_err(move |err| DeserializeErr::BadStringEncoding(err))
+                .map_err(move |err| DeserializeErr::BadStringEncoding(err.utf8_error()))
         })
 }
 
@@ -546,8 +567,8 @@ mod tests {
         let original = Tag::Compound(vec![Tag::IntArray(vec![
             1, 2, -5, 123127, -12373, 0, 0, 4, 2,
         ])
-            .with_name("test ints")])
-            .with_name("test");
+        .with_name("test ints")])
+        .with_name("test");
 
         let bytes = original.bytes();
         let Deserialized {
@@ -571,8 +592,8 @@ mod tests {
             4,
             2,
         ])
-            .with_name("test ints")])
-            .with_name("test");
+        .with_name("test ints")])
+        .with_name("test");
 
         let bytes = original.bytes();
         let Deserialized {
